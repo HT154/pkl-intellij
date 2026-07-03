@@ -26,6 +26,7 @@ import org.pkl.intellij.psi.PklDefaultType
 import org.pkl.intellij.psi.PklType
 import org.pkl.intellij.psi.PklUnionType
 import org.pkl.intellij.psi.enclosingModule
+import org.pkl.intellij.psi.isInPklBaseModule
 import org.pkl.intellij.psi.pklBaseModule
 import org.pkl.intellij.type.Type
 import org.pkl.intellij.type.toType
@@ -71,28 +72,57 @@ class PklTypeAnnotator : PklAnnotator() {
       return
     }
 
+    // TODO walk unaliased as it may be List<Class<nothing>>
+    // TODO only error for referent not domain
+
     val unaliased = referent.unaliased(base, context)
-    if (unaliased is Type.Reference && referent.containsConstrainedType(base, context)) {
-      createAnnotation(
-        HighlightSeverity.ERROR,
-        type.textRange,
-        "Reference type annotations may not contain type constraints.",
-        "<code>pkl.ref#Reference</code> type annotations may not contain type constraints.",
-        holder
-      )
+    when {
+      unaliased is Type.Reference && referent.walk(base, context) { !constraints.isEmpty() } -> {
+        createAnnotation(
+          HighlightSeverity.ERROR,
+          type.textRange,
+          "Reference type annotations may not contain type constraints.",
+          "<code>pkl.ref#Reference</code> type annotations may not contain type constraints.",
+          holder
+        )
+      }
+      unaliased is Type.Class &&
+        unaliased.psi.isInPklBaseModule && unaliased.psi.name == "Class" &&
+        referent.walk(base, context) {
+          // disallowed: constrained, union, nullable (erased to a Union w/ Null), nothing, string
+          // literal, parameterized
+          !constraints.isEmpty() ||
+            this is Type.Union ||
+            this is Type.Nothing ||
+            this is Type.StringLiteral ||
+            (this is Type.Class && typeArguments.isEmpty()) ||
+            (this is Type.Alias && typeArguments.isEmpty())
+        } -> {
+        createAnnotation(
+          HighlightSeverity.ERROR,
+          type.textRange,
+          "Class type checks can only succeed when its type argument is an un-parameterized class, a module, unknown, module, or an alias to one of those types.",
+          "<code>Class</code> type checks can only succeed when its type argument is an un-parameterized class, a module, <code>unknown</code>, <code>module</code>, or an alias to one of those types.",
+          holder
+        )
+      }
     }
   }
 
-  private fun Type.containsConstrainedType(base: PklBaseModule, context: PklProject?): Boolean =
-    !constraints.isEmpty() ||
+  private fun Type.walk(
+    base: PklBaseModule,
+    context: PklProject?,
+    predicate: Type.() -> Boolean
+  ): Boolean =
+    predicate() ||
       when (this) {
-        is Type.Class -> typeArguments.any { it.containsConstrainedType(base, context) }
+        is Type.Class -> typeArguments.any { it.walk(base, context, predicate) }
         is Type.Alias ->
-          typeArguments.any { it.containsConstrainedType(base, context) } ||
-            aliasedType(base, context).containsConstrainedType(base, context)
+          typeArguments.any { it.walk(base, context, predicate) } ||
+            aliasedType(base, context).walk(base, context, predicate)
         is Type.Union ->
-          leftType.containsConstrainedType(base, context) ||
-            rightType.containsConstrainedType(base, context)
+          leftType.walk(base, context, predicate) ||
+            rightType.walk(base, context, predicate)
         else -> false
       }
 
